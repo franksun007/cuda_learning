@@ -10,29 +10,53 @@
 #define TILE_WIDTH 32
 
 __global__ void matrix_multiplication
-(float *A, float *B, float *C, int dim, int tile_width) {
+(float *A, float *B, float *C, int dim) {
 
+    // init the block index, thread index etc. 
+    int bx = blockIdx.x; int by = blockIdx.y;
+    int tx = threadIdx.x; int ty = threadIdx.y;
+    
+    // fixed row and col for a specific thread in a specific block
+    int row = by * TILE_WIDTH + ty;
+    int col = bx * TILE_WIDTH + tx;
+
+    // Allocate the TILE on the shared memory.
     __shared__ float A_sub[TILE_WIDTH][TILE_WIDTH];
     __shared__ float B_sub[TILE_WIDTH][TILE_WIDTH];
 
-    int bx = blockIdx.x; int by = blockIdx.y;
-    int tx = threadIdx.x; int ty = threadIdx.y;
+    // If condition to eliminate extra or dim which dim % 32 (or 2^n) != 0
+    if (by * blockDim.y + ty < dim && bx * blockDim.y + tx < dim) {
 
-    int row = by * tile_width + ty;
-    int col = bx * tile_width + tx;
+        // partial sum
+        float sum = 0;
+        for (int k = 0; k < dim / TILE_WIDTH + 1; k++) {
+            // in case that k * TILE_WIDTH + thread > dim, 
+            // we assign those values to be 0.
+            // Even doing the dot product everything will be 0.
+            A_sub[ty][tx] = 
+                (k * TILE_WIDTH + tx) < dim ? 
+                A[row * dim + (k * TILE_WIDTH + tx)] : 0;
+            B_sub[ty][tx] = 
+                (k * TILE_WIDTH + ty) < dim ?
+                B[(k * TILE_WIDTH + ty) * dim + col] : 0;
+            // Wait until all the threads finish doing that 
+            __syncthreads();
 
-    float sum = 0;
-    for (int k = 0; k < dim / tile_width; k++) {
-        A_sub[ty][tx] = A[row * dim + (k * tile_width + tx)];
-        B_sub[ty][tx] = B[(k * tile_width + ty) * dim + col];
-        __syncthreads();
+            // At this point, all of the TILES need for the 
+            // target tile are loaded to shared mem.
 
-        for (int m = 0; m < tile_width; m++) {
-            sum += A_sub[ty][m] * B_sub[m][tx];
+            // The sum will be the cumulated sum for the 
+            // specific thread it's computing
+            for (int m = 0; m < TILE_WIDTH; m++) {
+                sum += A_sub[ty][m] * B_sub[m][tx];
+            }
+            // Wait until all the threads finish so that 
+            // the shared mem can be flashed
+            __syncthreads();
         }
-        __syncthreads();
+        // classic [][]
+        C[row * dim + col] = sum;
     }
-    C[row * dim + col] = sum;
 
 }
 
@@ -74,16 +98,28 @@ int main(int argc, char **argv) {
 
     cudaEventRecord(start);
     
+    // If dim < MAX_THREADS, then the threads we using can be 
+    // the dim itself. Otherwise, threads should be max threads
+    // in order to use 1024 threads per block. 
     int threads = dim < MAX_THREADS ? dim : MAX_THREADS;
-    int blocks = dim <= MAX_THREADS ? 1 : dim / threads;
 
-    int tile_width = TILE_WIDTH;
+    // Calculate the number of blocks that is necessary for 
+    // the calculation
+    int blocks = dim * dim / threads / threads + 1;
+    
+    // Figure out the square-like block geometry
+    // (which shouldn't be matter too much, but for simplicity)
+    int block_x = (int) sqrt(blocks);
+    int block_y = blocks / block_x;
+    if (block_x * block_y < blocks) {
+        block_x++;
+    }
 
-    dim3 dimGrid(blocks, blocks);
+    dim3 dimGrid(block_x, block_y);
     dim3 dimBlock(threads, threads);
 
     matrix_multiplication<<<dimGrid, dimBlock>>>
-        (dev_A, dev_B, dev_C, dim, tile_width);
+        (dev_A, dev_B, dev_C, dim);
 
     cudaMemcpy(host_C, dev_C, memSize, cudaMemcpyDeviceToHost);
 
