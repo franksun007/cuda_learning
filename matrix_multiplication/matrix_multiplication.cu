@@ -1,22 +1,39 @@
 #include <cuda.h>
 #include <cstdlib>
 #include <stdio.h>
+#include <math.h>
 
 #define DIM 4
 #define MAX_THREADS 32
 
-__global__ void matrix_multiplication(float *A, float *B, float *C, int dim) {
+#define SHARED_MEM_CAPACITY (48 * 1024)
+#define TILE_WIDTH 32
 
-    int i = threadIdx.x + blockIdx.x * blockDim.x;
-    int j = threadIdx.y + blockIdx.y * blockDim.y;
+__global__ void matrix_multiplication
+(float *A, float *B, float *C, int dim, int tile_width) {
 
-    if (i < dim && j < dim) {
-        float dot = 0;
-        for (int k = 0; k < dim; k++) {
-            dot += A[i * dim + k] * B[k * dim + j];
+    __shared__ float A_sub[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float B_sub[TILE_WIDTH][TILE_WIDTH];
+
+    int bx = blockIdx.x; int by = blockIdx.y;
+    int tx = threadIdx.x; int ty = threadIdx.y;
+
+    int row = by * tile_width + ty;
+    int col = bx * tile_width + tx;
+
+    float sum = 0;
+    for (int k = 0; k < dim / tile_width; k++) {
+        A_sub[ty][tx] = A[row * dim + (k * tile_width + tx)];
+        B_sub[ty][tx] = B[(k * tile_width + ty) * dim + col];
+        __syncthreads();
+
+        for (int m = 0; m < tile_width; m++) {
+            sum += A_sub[ty][m] * B_sub[m][tx];
         }
-        C[i * dim + j] = dot;
+        __syncthreads();
     }
+    C[row * dim + col] = sum;
+
 }
 
 int main(int argc, char **argv) {
@@ -39,12 +56,6 @@ int main(int argc, char **argv) {
     cudaEventCreate(&stop);
     float milliseconds = 0;
 
-    /*
-       didn't use
-       dim3 dimBlock(1024, 1024);
-       dim3 dimGrid(1,1);
-     */
-
     host_A = (float *) malloc(memSize);
     host_B = (float *) malloc(memSize);
     host_C = (float *) malloc(memSize);
@@ -66,11 +77,13 @@ int main(int argc, char **argv) {
     int threads = dim < MAX_THREADS ? dim : MAX_THREADS;
     int blocks = dim <= MAX_THREADS ? 1 : dim / threads;
 
+    int tile_width = TILE_WIDTH;
+
     dim3 dimGrid(blocks, blocks);
     dim3 dimBlock(threads, threads);
 
-    matrix_multiplication<<<dimGrid, dimBlock>>>(dev_A, dev_B, dev_C, dim);
-
+    matrix_multiplication<<<dimGrid, dimBlock>>>
+        (dev_A, dev_B, dev_C, dim, tile_width);
 
     cudaMemcpy(host_C, dev_C, memSize, cudaMemcpyDeviceToHost);
 
