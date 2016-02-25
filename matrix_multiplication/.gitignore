@@ -1,2 +1,4 @@
 ./MM_host
 ./MM_device
+./matrix_multiplication/MM_device
+./matrix_multiplication/MM_host
